@@ -40,13 +40,14 @@ import sys
 
 # Greybus version with which we comply.
 GB_VERSION_MAJOR = 0
-GB_VERSION_MINOR = 1
+GB_VERSION_MINOR = 2
 
 # Descriptor types.
 INTERFACE_DESCRIPTOR_TYPE = 0x01
 STRING_DESCRIPTOR_TYPE = 0x02
 BUNDLE_DESCRIPTOR_TYPE = 0x03
 CPORT_DESCRIPTOR_TYPE = 0x04
+PID_VID_TYPE = 0x05
 
 # Sizes of interest.
 MANIFEST_MAX_SIZE = 0xffff
@@ -60,6 +61,7 @@ def string_descriptor_size(string):
 STRING_DESCRIPTOR_MAX_SIZE = 0x0006 + 0xff   # length field is 1 byte
 BUNDLE_DESCRIPTOR_SIZE = 0x0008
 CPORT_DESCRIPTOR_SIZE = 0x0008
+PID_VID_SIZE = 0x0008 + 0x0004
 
 # Format strings for struct packing values into the on-wire manifest
 # binary format.
@@ -75,11 +77,14 @@ def string_descriptor_fmt(str_):
     return _desc('BB{}s').format(len(str_))
 BUNDLE_DESCRIPTOR_FMT = _desc('BB')
 CPORT_DESCRIPTOR_FMT = _desc('HBB')
+PID_VID_FMT = _desc('II');
 
 # String literals found in .mnfs files.
 MNFS_MNFS_HEADER = 'manifest-header'
 MNFS_MNFS_HEADER_VMAJ = 'version-major'
 MNFS_MNFS_HEADER_VMIN = 'version-minor'
+MNFS_MNFS_HEADER_VID = 'vendor-id'
+MNFS_MNFS_HEADER_PID = 'product-id'
 MNFS_INTERFACE_DESC = 'interface-descriptor'
 MNFS_INTERFACE_DESC_VSID = 'vendor-string-id'
 MNFS_INTERFACE_DESC_PSID = 'product-string-id'
@@ -95,7 +100,7 @@ def abort():
     sys.exit(1)
 
 def usage():
-    print('Usage: {} <manifest.mnfs>\n'
+    print('Usage: {} <manifest.mnfs> [vid] [pid]\n'
           '    Produces a binary manifest.mnfb file, given a human-readable\n'
           '    manifest file manifest.mnfs.'.format(sys.argv[0]),
           file=sys.stderr)
@@ -157,6 +162,12 @@ class ManifestPacker(object):
                          id_, bundle, protocol)
         self._inc_offset(CPORT_DESCRIPTOR_SIZE)
 
+    def add_vid_pid(self, vid, pid):
+        """Append VID descriptor to the manifest binary."""
+        struct.pack_into(PID_VID_FMT, self.__mnfb, self._offset,
+                         PID_VID_SIZE, PID_VID_TYPE, pid, vid)
+        self._inc_offset(PID_VID_SIZE)
+
 def parse_id(sec):
     """Parse IDs from section headers.
 
@@ -178,7 +189,7 @@ def warn_on_old_id_syntax(mnfs_file, cfg_parser, sec):
                   mnfs_file, sec),
               file=sys.stderr)
 
-def generate_mnfb(mnfs_file):
+def generate_mnfb(mnfs_file, vid=None, pid=None):
     # Force an OrderedDict to get deterministic output even on Python 2.6.
     cfg_parser = configparser.ConfigParser(dict_type=collections.OrderedDict)
     parsed_files = cfg_parser.read(mnfs_file)
@@ -205,10 +216,15 @@ def generate_mnfb(mnfs_file):
                            base=0)
                 vmin = int(cfg_parser.get(sec, MNFS_MNFS_HEADER_VMIN),
                            base=0)
-                if not (vmaj == GB_VERSION_MAJOR and vmin == GB_VERSION_MINOR):
+                if not (vmaj == GB_VERSION_MAJOR and vmin <= GB_VERSION_MINOR):
                     raise ValueError(
                         "Got version {}.{}; only version {}.{} interfaces are supported".format(
                         vmaj, vmin, GB_VERSION_MAJOR, GB_VERSION_MINOR))
+                if (vid  == None and pid == None):
+                    vid = int(cfg_parser.get(sec, MNFS_MNFS_HEADER_VID),
+                               base=16)
+                    pid = int(cfg_parser.get(sec, MNFS_MNFS_HEADER_PID),
+                               base=16)
             elif sec_s == MNFS_INTERFACE_DESC:
                 vsid = int(cfg_parser.get(sec, MNFS_INTERFACE_DESC_VSID),
                            base=0)
@@ -245,18 +261,27 @@ def generate_mnfb(mnfs_file):
         except configparser.NoOptionError as e:
             raise ValueError(e.message)
 
+    mp.add_vid_pid(vid, pid)
+
     return mp.mnfb
 
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         print('Error: missing manifest file.', file=sys.stderr)
         usage()
 
     mnfs = sys.argv[1]
     mnfb = os.path.splitext(mnfs)[0] + '.mnfb'
 
+    if (len(sys.argv) > 3):
+        vid = int(sys.argv[2], base=16)
+        pid = int(sys.argv[3], base=16)
+    else:
+        vid = None
+        pid = None
+
     try:
-        mnfb_contents = generate_mnfb(mnfs)
+        mnfb_contents = generate_mnfb(mnfs, vid, pid)
     except ValueError as ve:
         print("Error: invalid manifest: {}".format(ve.message),
                file=sys.stderr)
